@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../dpdk-sender"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"inttypes.h": "c",
+			"rte_mbuf.h": "c",
+			"unistd.h": "c"
+		}
+	}
+}
