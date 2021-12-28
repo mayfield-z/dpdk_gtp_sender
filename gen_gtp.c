@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <arpa/inet.h>
@@ -17,14 +18,12 @@ void set_mac(struct rte_ether_hdr *eth_hdr, char *s_mac_str, char *d_mac_str)
 
     memset(&(eth_hdr->d_addr), 0, sizeof(eth_hdr->d_addr));
     memset(&(eth_hdr->s_addr), 0, sizeof(eth_hdr->s_addr));
-    srand(time(NULL));
 
     /* s mac */
     if (!s_mac_str)
     {
         for (i = 0; i < 6; ++i)
         {
-            // eth_hdr->s_addr.addr_bytes[i] = (uint8_t)0x34;
             eth_hdr->s_addr.addr_bytes[i] = ++base;
         }
     }
@@ -58,10 +57,7 @@ void set_mac(struct rte_ether_hdr *eth_hdr, char *s_mac_str, char *d_mac_str)
 
 void set_ipv4(struct rte_ipv4_hdr *ipv4, char *s_ip_str, char *d_ip_str, uint8_t next_proto_id, uint16_t len)
 {
-    static int cnt = 0;
-
     //ipv4 header
-    srand(time(NULL));
     ipv4->version_ihl = (uint8_t)0x45;
     ipv4->type_of_service = (uint8_t)0;
     ipv4->total_length = htons(len);
@@ -82,7 +78,6 @@ void set_ipv4(struct rte_ipv4_hdr *ipv4, char *s_ip_str, char *d_ip_str, uint8_t
 
 void set_udp(struct rte_udp_hdr *udp, struct rte_ipv4_hdr *ipv4, uint16_t s_port, uint16_t d_port, uint16_t len)
 {
-    srand(time(NULL));
 
     udp->src_port = htons(s_port);
     udp->dst_port = htons(d_port);
@@ -99,7 +94,6 @@ void set_udp_port(struct rte_udp_hdr *udp, uint16_t s_port, uint16_t d_port)
 
 void set_gtp(struct gtp_hdr *gtp, uint64_t teid, uint16_t len)
 {
-    srand(time(NULL));
     gtp->flag = 0x34;
     gtp->message_type = 0xff;
     gtp->length = htons(len);
@@ -116,7 +110,6 @@ void set_gtp(struct gtp_hdr *gtp, uint64_t teid, uint16_t len)
 }
 
 void set_icmp(struct rte_icmp_hdr *icmp) {
-    srand(time(NULL));
     icmp->icmp_type = 8;
     icmp->icmp_code = 0;
     icmp->icmp_ident = htobe16(0x09);
@@ -124,12 +117,33 @@ void set_icmp(struct rte_icmp_hdr *icmp) {
     icmp->icmp_cksum = 0x2fc9;
 }
 
-void set_payload(struct gtp_packet *gp, uint8_t *payload, uint16_t payload_length) {
+void set_payload(struct gtp_pkt *gp, uint8_t *payload, uint16_t payload_length) {
     assert(payload_length <= sizeof(gp->payload));
     rte_memcpy(gp->payload, payload, payload_length);
 }
 
-struct rte_mbuf *generate_mbuf(struct gtp_packet *gp, struct rte_mempool *mp, uint32_t pkt_length)
+void generate_gtp(struct gtp_pkt_info *info) {
+    struct gtp_pkt *gp = NULL;
+    gp = (struct gtp_pkt*)malloc(sizeof(struct gtp_pkt));
+
+    uint16_t _pkt_length = info->pkt_length;
+    set_mac(&(gp->ether), info->s_mac, info->d_mac);
+    _pkt_length -= sizeof(gp->ether);
+    set_ipv4(&(gp->ipv4_1), info->n3_gnb_ip, info->n3_upf_ip, 17, _pkt_length);
+    _pkt_length -= sizeof(gp->ipv4_1);
+    set_udp(&(gp->udp_1), &(gp->ipv4_1), 2152, 2152, _pkt_length);
+    _pkt_length -= sizeof(gp->udp_1);
+    set_gtp(&(gp->gtp), info->teid, _pkt_length);
+    _pkt_length -= sizeof(gp->gtp);
+    set_ipv4(&(gp->ipv4_2), info->ue_ip, info->dn_ip, 17, _pkt_length);
+    _pkt_length -= sizeof(gp->ipv4_2);
+    set_udp(&(gp->udp_2), &(gp->ipv4_2), info->udp_s_port, info->udp_d_port, _pkt_length);
+    _pkt_length -= sizeof(gp->udp_2);
+    info->payload_offset = info->pkt_length - _pkt_length;
+    info->gp = gp;
+}
+
+struct rte_mbuf *generate_mbuf(struct gtp_pkt *gp, struct rte_mempool *mp, uint32_t pkt_length)
 {
     struct rte_mbuf *m = NULL;
 

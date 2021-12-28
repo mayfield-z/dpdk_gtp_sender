@@ -24,7 +24,7 @@ struct gtp_hdr
     struct ext_hdr pdu_session_container;
 } __attribute__((aligned));
 
-struct gtp_packet
+struct gtp_pkt
 {
     struct rte_ether_hdr ether;
     struct rte_ipv4_hdr ipv4_1;
@@ -34,5 +34,23 @@ struct gtp_packet
     struct rte_udp_hdr udp_2;
     uint8_t payload[512];
 } __attribute__((packed));
+
+struct gtp_pkt_info
+{
+    uint16_t pkt_length;
+    uint16_t payload_offset;
+    char *s_mac;
+    char *d_mac;
+    char *n3_gnb_ip;
+    char *n3_upf_ip;
+    uint64_t teid;
+    char *ue_ip;
+    char *dn_ip;
+    uint16_t udp_s_port;
+    uint16_t udp_d_port;
+    uint8_t *payload;
+    struct gtp_pkt *gp;
+    struct rte_mbuf *mb;
+} __attribute__((aligned));
 
 #endif

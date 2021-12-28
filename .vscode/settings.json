@@ -1,8 +1,0 @@
-{
-    "files.associations": {
-        "inttypes.h": "c",
-        "rte_mbuf.h": "c",
-        "unistd.h": "c"
-    },
-    "C_Cpp.errorSquiggles": "Disabled"
-}

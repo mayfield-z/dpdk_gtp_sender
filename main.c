@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <inttypes.h>
 #include <sched.h>
+#include <time.h>
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -17,6 +18,7 @@
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
 #include <rte_timer.h>
+#include <rte_hexdump.h>
 #include "gen_gtp.h"
 #include "gtp_hdr.h"
 
@@ -29,9 +31,13 @@
 #define MAX_TXQ 1024
 #define MAX_RXQ 1024
 #define MAX_LCORE 64
-#define MAX_PORTS 2
+#define MAX_PORTS 32
+#define PAYLOAD1 "hello"
+#define PAYLOAD2 "helloagain"
 
-#define NB_MBUF ((1 << 20) - 1)
+#define NB_MBUF ((1 << 15) - 1)
+// #define NB_MBUF ((1 << 8) - 1)
+#define NB_GPI NB_MBUF
 
 #ifdef CLOCK_MONOTONIC_RAW /* Defined in glibc bits/time.h */
 #define CLOCK_TYPE_ID CLOCK_MONOTONIC_RAW
@@ -39,10 +45,11 @@
 #define CLOCK_TYPE_ID CLOCK_MONOTONIC
 #endif
 
-#define NS_PER_SEC 1E9
+#define NS_PER_SEC 1E9L
+#define NS_PER_US 1E3
 
 extern uint16_t pkt_length;
-struct rte_mbuf* mbufs[NB_MBUF];
+struct gtp_pkt_info *gpis[NB_GPI];
 
 uint8_t debug;
 
@@ -68,12 +75,14 @@ struct global_info
     uint64_t tx_mbps; // configured tx speed, Mbps
     int nb_txq;
     int nb_rxq;
+    unsigned nb_ports;
 };
 
 struct global_info ginfo = {
     .tx_mbps = 10,
     .nb_txq = 1,
     .nb_rxq = 1,
+    .nb_ports = 0,
 };
 /* >8 End of configuration of ethernet ports. */
 
@@ -93,7 +102,7 @@ struct port_stats_info
         uint64_t rx_total_bytes;
         uint64_t rx_last_total_pkts;
         uint64_t rx_last_total_bytes;
-        double OWD;
+        unsigned long long rx_total_latency_us;
     } rxq_stats[MAX_RXQ];
 
     uint64_t tx_total_pkts;
@@ -104,6 +113,7 @@ struct port_stats_info
     uint64_t rx_total_bytes;
     uint64_t rx_pps;
     uint64_t rx_mbps;
+    unsigned long long rx_total_latency_us;
 } port_stats[MAX_PORTS];
 
 struct lcore_args
@@ -126,7 +136,6 @@ struct lcore_args
         uint32_t port_id;
     } rx;
 } lc_args[MAX_LCORE];
-
 
 static void usage()
 {
@@ -189,13 +198,27 @@ static void parse_params(int argc, char **argv)
 
 void my_stats_display()
 {
+    static uint64_t prev_ns;
+    struct timespec cur_time;
     int i, j;
-    port_stats->tx_total_pkts = 0;
-    port_stats->rx_total_pkts = 0;
-    port_stats->tx_total_bytes = 0;
-    port_stats->rx_total_bytes = 0;
-    for (i = 0; i < MAX_PORTS; i++)
+    uint64_t diff_ns, rx_total_pkts = 0;
+    unsigned long long latency_in_us = 0;
+    struct port_stats_info local_port_stats[MAX_PORTS];
+    memcpy(&local_port_stats, &port_stats, sizeof(local_port_stats));
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &cur_time) == 0)
     {
+        uint64_t ns;
+
+        ns = cur_time.tv_sec * NS_PER_SEC;
+        ns += cur_time.tv_nsec;
+
+        if (prev_ns != 0)
+            diff_ns = ns - prev_ns;
+        prev_ns = ns;
+    }
+    for (i = 0; i < ginfo.nb_ports; i++)
+    {
+        
         printf("\n  #######################################\n");
         printf("  port#%d:\n    ->tx:\n      ->p:", i);
         for (j = 0; j < ginfo.nb_txq; j++)
@@ -204,8 +227,8 @@ void my_stats_display()
             {
                 printf("\n        ");
             }
-            printf("q#%d: %llu ", j, (unsigned long long)port_stats[i].txq_stats[j].tx_total_pkts);
-            port_stats->tx_total_pkts += port_stats[i].txq_stats[j].tx_total_pkts;
+            printf("q#%d: %llu ", j, (unsigned long long)local_port_stats[i].txq_stats[j].tx_total_pkts);
+            local_port_stats[i].tx_total_pkts += local_port_stats[i].txq_stats[j].tx_total_pkts;
         }
         printf("\n      ->b:");
         for (j = 0; j < ginfo.nb_txq; j++)
@@ -214,10 +237,10 @@ void my_stats_display()
             {
                 printf("\n        ");
             }
-            printf("q#%d: %llu ", j, (unsigned long long)port_stats[i].txq_stats[j].tx_total_bytes);
-            port_stats->tx_total_bytes += port_stats[i].txq_stats[j].tx_total_bytes;
+            printf("q#%d: %llu ", j, (unsigned long long)local_port_stats[i].txq_stats[j].tx_total_bytes);
+            local_port_stats[i].tx_total_bytes += local_port_stats[i].txq_stats[j].tx_total_bytes;
         }
-        printf("\ntx total bytes: %lu", port_stats->tx_total_bytes);
+        printf("\nport %d tx total bytes: %lu", i, local_port_stats[i].tx_total_bytes);
         printf("\n    ->rx:\n      ->p:");
         for (j = 0; j < ginfo.nb_rxq; j++)
         {
@@ -225,8 +248,8 @@ void my_stats_display()
             {
                 printf("\n        ");
             }
-            printf("q#%d: %llu ", j, (unsigned long long)port_stats[i].rxq_stats[j].rx_total_pkts);
-            port_stats->rx_total_pkts += port_stats[i].rxq_stats[j].rx_total_pkts;
+            printf("q#%d: %llu ", j, (unsigned long long)local_port_stats[i].rxq_stats[j].rx_total_pkts);
+            local_port_stats[i].rx_total_pkts += local_port_stats[i].rxq_stats[j].rx_total_pkts;
         }
         printf("\n      ->b:");
         for (j = 0; j < ginfo.nb_rxq; j++)
@@ -235,11 +258,18 @@ void my_stats_display()
             {
                 printf("\n        ");
             }
-            printf("q#%d: %llu ", j, (unsigned long long)port_stats[i].rxq_stats[j].rx_total_bytes);
-            port_stats->rx_total_bytes += port_stats[i].rxq_stats[j].rx_total_bytes;
+            printf("q#%d: %llu ", j, (unsigned long long)local_port_stats[i].rxq_stats[j].rx_total_bytes);
+            local_port_stats[i].rx_total_bytes += local_port_stats[i].rxq_stats[j].rx_total_bytes;
+        }
+        rx_total_pkts += local_port_stats[i].rx_total_bytes;
+        printf("\nport %d rx total bytes: %lu", i, local_port_stats[i].rx_total_bytes);
+        for (j = 0; j < ginfo.nb_rxq; j++)
+        {
+            latency_in_us += local_port_stats[i].rxq_stats[j].rx_total_latency_us;
         }
         printf("\n  #######################################\n");
     }
+    printf("\naverage latency in us: %llu", latency_in_us/rx_total_pkts);
 }
 
 void nic_stats_display(uint16_t port_id)
@@ -352,7 +382,7 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool, uint16_t rx_rings, uint1
     retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
     if (retval != 0)
         return retval;
-    
+
     printf("\nport #%u nb_rxd=%u nb_txd=%u.\n", port, nb_rxd, nb_txd);
 
     /* Allocate and set up 1 RX queue per Ethernet port. */
@@ -405,41 +435,42 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool, uint16_t rx_rings, uint1
 static void timer_handler(__rte_unused struct rte_timer *timer, void *arg)
 {
     static uint32_t mb_pointer = 0;
-    if (unlikely(mb_pointer > NB_MBUF-40))
+    if (unlikely(mb_pointer > NB_MBUF - BURST_SIZE * ginfo.nb_txq - 1))
     {
         mb_pointer = 0;
     }
 
     struct lcore_args *largs = (struct lcore_args *)arg;
-    // struct gtp_packet gp = gp;
     int i;
     int ret;
-    // uint8_t payload[256];
-    // uint64_t tsc = rte_rdtsc();
-    // rte_memcpy(payload, &tsc, sizeof(tsc));
-    // for (i = 0; i < 10; i++)
-    // {
-    //     int r = rand();
-    //     rte_memcpy(payload + 8 + i * sizeof(r), &r, sizeof(r));
-    // }
-    // set_payload(&local_gp, payload, sizeof(payload));
+    struct timespec tp;
+    char *payload1 = PAYLOAD1;
+    char *payload2 = PAYLOAD2;
 
+    ret = clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
+    if (unlikely(ret)) {
+        rte_panic("clock gettime failed: %d", ret);
+    }
     for (i = 0; i < BURST_SIZE; i++)
     {
-        largs->tx.m_table[i] = mbufs[mb_pointer++];
+        largs->tx.m_table[i] = gpis[mb_pointer]->mb;
+        uint16_t offset = gpis[mb_pointer]->payload_offset;
+        char *payload_pointer = rte_pktmbuf_mtod_offset(largs->tx.m_table[i], char *, offset);
+        rte_memcpy(payload_pointer, payload1, strlen(payload1));
+        payload_pointer += strlen(payload1);
+        rte_memcpy(payload_pointer, &tp, sizeof(tp));
+        payload_pointer += sizeof(tp);
+        rte_memcpy(payload_pointer, payload2, strlen(payload2));
+        mb_pointer++;
     }
 
     ret = rte_eth_tx_burst(largs->tx.port_id, largs->tx.queue_id, largs->tx.m_table, BURST_SIZE);
-    // while(to_send != BURST_SIZE) {    
-        // ret = rte_eth_tx_burst(largs->tx.port_id, largs->tx.queue_id, largs->tx.m_table + to_send, BURST_SIZE - to_send);
-        // to_send += ret;
-    // }
 
-    // -1G
-    // port_stats[largs->tx.port_id].txq_stats[largs->tx.queue_id].tx_total_pkts += ret;
-    // port_stats[largs->tx.port_id].txq_stats[largs->tx.queue_id].tx_total_bytes += ret * pkt_length;
+    port_stats[largs->tx.port_id].txq_stats[largs->tx.queue_id].tx_total_pkts += ret;
+    port_stats[largs->tx.port_id].txq_stats[largs->tx.queue_id].tx_total_bytes += ret * gpis[mb_pointer]->pkt_length;
 
-    if (unlikely(ret < BURST_SIZE)) {
+    if (unlikely(ret < BURST_SIZE))
+    {
         while (ret < BURST_SIZE)
         {
             rte_pktmbuf_free(largs->tx.m_table[ret++]);
@@ -468,7 +499,6 @@ __rte_noreturn static int
 tx_lcore_main(void *args)
 {
     struct lcore_args *largs;
-    int ret;
 
     largs = (struct lcore_args *)args;
     assert(largs->tx.is_tx_lcore);
@@ -502,10 +532,8 @@ __rte_noreturn static int
 rx_lcore_main(void *args)
 {
     struct lcore_args *largs;
-    uint8_t is_rx;
     uint16_t rxq_id;
     int ret;
-    struct rte_mbuf *rx_bufs[BURST_SIZE];
 
     largs = (struct lcore_args *)args;
     assert(largs->rx.is_rx_lcore);
@@ -514,18 +542,42 @@ rx_lcore_main(void *args)
     printf("CPU#%d lcore#%u is receiving packet from port %u - queue %u\n", sched_getcpu(), rte_lcore_id(), largs->rx.port_id,
            largs->rx.queue_id);
 
-    port_stats[largs->rx.port_id].rxq_stats[largs->rx.queue_id].rx_total_pkts = 0;
-    port_stats[largs->rx.port_id].rxq_stats[largs->rx.queue_id].rx_last_total_pkts = 0;
-    port_stats[largs->rx.port_id].rxq_stats[largs->rx.queue_id].rx_total_bytes = 0;
-    port_stats[largs->rx.port_id].rxq_stats[largs->rx.queue_id].rx_last_total_bytes = 0;
+    size_t payload_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+    char *payload1_cmp = PAYLOAD1;
+    char *payload2_cmp = PAYLOAD2;
+    struct timespec *payload_tp = NULL;
+    payload_tp = (struct timespec *)malloc(sizeof(struct timespec));
+    struct timespec *now_tp = NULL;
+    now_tp = (struct timespec *)malloc(sizeof(struct timespec));
 
     for (;;)
     {
+        clock_gettime(CLOCK_MONOTONIC_RAW, now_tp);
         ret = rte_eth_rx_burst(largs->rx.port_id, largs->rx.queue_id, largs->rx.m_table, BURST_SIZE);
         port_stats[largs->rx.port_id].rxq_stats[rxq_id].rx_total_pkts += ret;
         for (int i = 0; i < ret; i++)
         {
             port_stats[largs->rx.port_id].rxq_stats[rxq_id].rx_total_bytes += rte_pktmbuf_pkt_len(largs->rx.m_table[i]);
+            char * payload = rte_pktmbuf_mtod_offset(largs->rx.m_table[i], char *, payload_offset);
+            if (unlikely(strncmp(payload, payload1_cmp, sizeof(payload1_cmp)))) {
+                if (debug) {
+                    rte_hexdump(stdout, "payload1 first 5:", payload, 5);
+                }
+                rte_pktmbuf_free(largs->rx.m_table[i]);
+                continue;
+            }
+            payload += sizeof(payload1_cmp);
+            rte_memcpy(payload_tp, payload, sizeof(struct timespec));
+            payload += sizeof(struct timespec);
+            if (unlikely(strncmp(payload, payload2_cmp, sizeof(payload2_cmp)))) {
+                if (debug) {
+                    rte_hexdump(stdout, "payload2 first 10:", payload, 10);
+                }
+                rte_pktmbuf_free(largs->rx.m_table[i]);
+                continue;
+            }
+            port_stats[largs->rx.port_id].rxq_stats[rxq_id].rx_total_latency_us += ((now_tp->tv_sec - payload_tp->tv_sec) * NS_PER_SEC + now_tp->tv_nsec - payload_tp->tv_sec) / NS_PER_US;
+               
             rte_pktmbuf_free(largs->rx.m_table[i]);
         }
     }
@@ -539,9 +591,7 @@ int main(int argc, char *argv[])
     struct rte_mempool *mbuf_pool;
     unsigned nb_ports;
     uint16_t portid;
-    struct gtp_packet gp;
-    struct gtp_packet gp2;
-
+    struct timespec res;
     /* Initializion the Environment Abstraction Layer (EAL). 8< */
     int ret = rte_eal_init(argc, argv);
     if (ret < 0)
@@ -557,6 +607,7 @@ int main(int argc, char *argv[])
            ginfo.nb_rxq);
     /* Check that there is an even number of ports to send/receive on. */
     nb_ports = rte_eth_dev_count_avail();
+    ginfo.nb_ports = nb_ports;
 
     unsigned int lcore_num = rte_lcore_count();
     if (lcore_num - 1 < ginfo.nb_txq + ginfo.nb_rxq)
@@ -574,6 +625,9 @@ int main(int argc, char *argv[])
         rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
     rte_timer_subsystem_init();
+    clock_getres(CLOCK_MONOTONIC_RAW, &res);
+    srand(time(NULL));
+    printf("clock monotonic raw's resolution is %ld.%ld", res.tv_sec, res.tv_nsec);
 
     for (int i = 0; i < lcore_num; i++)
     {
@@ -588,37 +642,29 @@ int main(int argc, char *argv[])
         {
             lc_args[i].rx.is_rx_lcore = 1;
             lc_args[i].rx.queue_id = i + ginfo.nb_rxq - (int)lcore_num;
-            lc_args[i].rx.port_id = 1;
+            lc_args[i].rx.port_id = 0;
         }
     }
 
-    uint16_t _pkt_length = pkt_length;
-    // to upf
-    set_mac(&(gp.ether), "52:54:00:15:3e:09", "52:54:00:77:0c:cc");
-    // local
-    //    set_mac(&(gp.ether), "52:54:00:15:3e:09", "52:54:00:42:b2:9b");
-    _pkt_length -= sizeof(gp.ether);
-    set_ipv4(&(gp.ipv4_1), "1.1.1.1", "1.1.1.2", 17, _pkt_length);
-    _pkt_length -= sizeof(gp.ipv4_1);
-    set_udp(&(gp.udp_1), &(gp.ipv4_1), 2152, 2152, _pkt_length);
-    _pkt_length -= sizeof(gp.udp_1);
-    set_gtp(&(gp.gtp), 0x01, _pkt_length);
-    _pkt_length -= sizeof(gp.gtp);
-    set_ipv4(&(gp.ipv4_2), "60.60.0.1", "1.1.1.3", 17, _pkt_length);
-    _pkt_length -= sizeof(gp.ipv4_2);
-    set_udp(&(gp.udp_2), &(gp.ipv4_1), 10000, 10000, _pkt_length);
-
-    set_udp(&(gp2.udp_2), &(gp.ipv4_1), 10000, 10000, _pkt_length);
-    
     for (size_t i = 0; i < NB_MBUF; i++)
     {
-        struct rte_mbuf* mb;
-        set_udp_port(&(gp.udp_2), (uint16_t)rand()%20000+20000, (uint16_t)rand()%20000+20000);
-        mb = generate_mbuf(&gp, mbuf_pool, pkt_length);
-        mb->ol_flags |= PKT_TX_UDP_CKSUM;
-        mbufs[i] = mb;
+        struct gtp_pkt_info *gpi = NULL;
+        gpi = (struct gtp_pkt_info*)malloc(sizeof(struct gtp_pkt_info));
+        gpi->pkt_length = pkt_length;
+        gpi->s_mac = "52:54:00:15:3e:09";
+        gpi->d_mac = "52:54:00:77:0c:cc";
+        gpi->n3_gnb_ip = "1.1.1.1";
+        gpi->n3_upf_ip = "1.1.1.2";
+        gpi->teid = 0x01;
+        gpi->ue_ip = "60.60.0.1";
+        gpi->dn_ip = "1.1.1.1";
+        gpi->udp_s_port = (uint16_t)rand() % 20000 + 20000;
+        gpi->udp_d_port = (uint16_t)rand() % 20000 + 40000;
+        generate_gtp(gpi);
+        gpi->mb = generate_mbuf(gpi->gp, mbuf_pool, gpi->pkt_length);
+        gpi->mb->ol_flags |= PKT_TX_UDP_CKSUM;
+        gpis[i] = gpi;
     }
-    
 
     /* Initializing all ports. 8< */
     RTE_ETH_FOREACH_DEV(portid)
@@ -656,9 +702,12 @@ int main(int argc, char *argv[])
         else if (c == 's')
         {
             nic_stats_display(0);
-            nic_stats_display(1);
+            // nic_stats_display(1);
+            // nic_stats_display(2);
+            // nic_stats_display(3);
         }
-        else if (c == 'm'){
+        else if (c == 'm')
+        {
             my_stats_display();
         }
     }
